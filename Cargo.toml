@@ -1,0 +1,16 @@
+[package]
+name = "etale"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Structured diff and merge CLI for files and data — powered by tate and mumford"
+repository = "https://github.com/j-yang/etale"
+keywords = ["diff", "merge", "git", "structured-data", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+
+[dependencies]
+tate = "0.3"
+mumford = "0.4"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
