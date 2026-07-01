@@ -14,24 +14,26 @@ jobs:
       matrix:
         include:
           - os: macos-latest
+            target: aarch64-apple-darwin
             artifact: etale-darwin-arm64
-            ext: ''
-          - os: macos-13
+          - os: macos-latest
+            target: x86_64-apple-darwin
             artifact: etale-darwin-x64
-            ext: ''
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             artifact: etale-linux-x64
-            ext: ''
           - os: windows-latest
+            target: x86_64-pc-windows-msvc
             artifact: etale-win32-x64.exe
-            ext: '.exe'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
       - shell: bash
-        run: cp "target/release/etale${{ matrix.ext }}" "${{ matrix.artifact }}"
+        run: cp target/${{ matrix.target }}/release/etale${{ matrix.artifact == 'etale-win32-x64.exe' && '.exe' || '' }} "${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
