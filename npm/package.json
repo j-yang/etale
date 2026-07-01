@@ -1,0 +1,31 @@
+{
+  "name": "etale",
+  "version": "0.1.0",
+  "description": "Structured diff and merge CLI — powered by tate and mumford",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/j-yang/etale"
+  },
+  "homepage": "https://github.com/j-yang/etale",
+  "keywords": [
+    "diff",
+    "merge",
+    "git",
+    "cli",
+    "structured-data"
+  ],
+  "bin": {
+    "etale": "bin/etale.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "files": [
+    "install.js",
+    "bin/etale.js"
+  ]
+}
