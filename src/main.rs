@@ -115,7 +115,7 @@ fn print_diff_human(result: &mumford::DiffResult) {
 
     if let Some(text) = &result.text {
         println!("format: text");
-        let unified = tate::unified::to_unified(&text.ops, 3);
+        let unified = mumford::unified::to_unified(&text.ops, 3);
         if unified.is_empty() {
             println!("(no changes)");
         } else {
@@ -154,7 +154,7 @@ fn cmd_grid_diff() -> Result<(), String> {
     let input = read_stdin_json()?;
     let base = json_to_grid(get_field(&input, "base")?);
     let other = json_to_grid(get_field(&input, "other")?);
-    let diff = tate::grid::grid_diff(&base, &other, &tate::grid::GridOptions::default());
+    let diff = mumford::grid::grid_diff(&base, &other, &mumford::grid::GridOptions::default());
     println!("{}", json_to_pretty(&diff)?);
     Ok(())
 }
