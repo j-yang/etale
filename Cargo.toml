@@ -9,8 +9,14 @@ keywords = ["diff", "merge", "git", "structured-data", "cli"]
 categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
-tate = "0.3"
-mumford = "0.4"
+tate = "0.4"
+mumford = "0.5"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Dev-only: build against local sibling checkouts during the coordinated
+# tate 0.4 / mumford 0.5 convergence. Remove once both are published.
+[patch.crates-io]
+tate = { path = "../tate" }
+mumford = { path = "../mumford" }

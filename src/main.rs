@@ -24,11 +24,13 @@ enum Command {
     },
     /// Diff two grids from JSON stdin: {"base": [[...]], "other": [[...]]}
     GridDiff,
-    /// 3-way merge grids from JSON stdin: {"base":[[]], "ours":[[]], "theirs":[[]]}
-    GridMerge,
     /// Diff two JSON trees from stdin: {"base": {...}, "other": {...}}
     TreeDiff,
     /// 3-way merge JSON trees from stdin: {"base":{}, "ours":{}, "theirs":{}}
+    ///
+    /// This is the single 3-way merge. Grid and sequence inputs are merged by
+    /// keying them into trees first (see tate's keying adapters), not by a
+    /// separate merge algorithm.
     TreeMerge,
 }
 
@@ -37,7 +39,6 @@ fn main() {
     let result = match cli.command {
         Command::Diff { a, b, json } => cmd_diff(&a, &b, json),
         Command::GridDiff => cmd_grid_diff(),
-        Command::GridMerge => cmd_grid_merge(),
         Command::TreeDiff => cmd_tree_diff(),
         Command::TreeMerge => cmd_tree_merge(),
     };
@@ -155,17 +156,6 @@ fn cmd_grid_diff() -> Result<(), String> {
     let other = json_to_grid(get_field(&input, "other")?);
     let diff = tate::grid::grid_diff(&base, &other, &tate::grid::GridOptions::default());
     println!("{}", json_to_pretty(&diff)?);
-    Ok(())
-}
-
-fn cmd_grid_merge() -> Result<(), String> {
-    let input = read_stdin_json()?;
-    let base = json_to_grid(get_field(&input, "base")?);
-    let ours = json_to_grid(get_field(&input, "ours")?);
-    let theirs = json_to_grid(get_field(&input, "theirs")?);
-    let result =
-        tate::grid::grid_merge(&base, &ours, &theirs, &tate::grid::GridOptions::default());
-    println!("{}", json_to_pretty(&result)?);
     Ok(())
 }
 
