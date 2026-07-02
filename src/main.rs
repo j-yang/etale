@@ -1,12 +1,52 @@
+mod convert;
+mod inline;
+mod lcs;
+mod lines;
+mod unified;
+
 use clap::{Parser, Subcommand};
-use serde_json::Value;
-use std::io::{self, Read};
+use serde::{Deserialize, Serialize};
+use tate::patch;
+use tate::section::Value;
+use tate::tree::{self, ChangeKind, TreeNode};
+
+#[derive(Serialize, Deserialize)]
+struct JsonPatch {
+    edits: Vec<JsonEdit>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct JsonEdit {
+    location: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new: Option<Value>,
+}
+
+fn patch_to_json(p: &patch::Patch) -> JsonPatch {
+    JsonPatch {
+        edits: p.edits.iter().map(|(loc, edit)| JsonEdit {
+            location: loc.clone(),
+            old: edit.old.clone(),
+            new: edit.new.clone(),
+        }).collect(),
+    }
+}
+
+fn patch_from_json(jp: JsonPatch) -> patch::Patch {
+    let mut edits = std::collections::BTreeMap::new();
+    for e in jp.edits {
+        edits.insert(e.location, patch::PointEdit { old: e.old, new: e.new });
+    }
+    patch::Patch { edits }
+}
 
 #[derive(Parser)]
 #[command(
     name = "etale",
     version,
-    about = "Structured diff and merge for files and data — powered by tate + mumford"
+    about = "Structural diff and merge for JSON, YAML, TOML, and text — powered by tate's patch algebra"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -15,32 +55,61 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Diff two files (auto-detect format: xlsx, docx, pptx, pdf, text)
+    /// Diff two files (auto-detect: JSON, YAML, TOML, or text)
     Diff {
         a: String,
         b: String,
         #[arg(long)]
         json: bool,
     },
-    /// Diff two grids from JSON stdin: {"base": [[...]], "other": [[...]]}
-    GridDiff,
-    /// Diff two JSON trees from stdin: {"base": {...}, "other": {...}}
+    /// Diff two JSON trees from stdin: {"base":{}, "other":{}}
     TreeDiff,
     /// 3-way merge JSON trees from stdin: {"base":{}, "ours":{}, "theirs":{}}
-    ///
-    /// This is the single 3-way merge. Grid and sequence inputs are merged by
-    /// keying them into trees first (see tate's keying adapters), not by a
-    /// separate merge algorithm.
     TreeMerge,
+    /// Lossless patch algebra (diff/apply/invert/compose)
+    Patch {
+        #[command(subcommand)]
+        action: PatchCmd,
+    },
+    /// Git external diff driver (called by git via diff.<name>.command)
+    GitDiff {
+        #[arg(allow_hyphen_values = true, num_args = 7)]
+        args: Vec<String>,
+    },
+    /// Git merge driver: base ours theirs (writes result to ours)
+    GitMerge {
+        base: String,
+        ours: String,
+        theirs: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PatchCmd {
+    /// Generate a lossless patch between two files
+    Diff { a: String, b: String },
+    /// Apply a patch file to an input file, writing the result to stdout
+    Apply { patch: String, input: String },
+    /// Invert a patch (swap old/new in every edit)
+    Invert { patch: String },
+    /// Compose two patches sequentially (first then second)
+    Compose { first: String, second: String },
 }
 
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Diff { a, b, json } => cmd_diff(&a, &b, json),
-        Command::GridDiff => cmd_grid_diff(),
         Command::TreeDiff => cmd_tree_diff(),
         Command::TreeMerge => cmd_tree_merge(),
+        Command::Patch { action } => match action {
+            PatchCmd::Diff { a, b } => cmd_patch_diff(&a, &b),
+            PatchCmd::Apply { patch, input } => cmd_patch_apply(&patch, &input),
+            PatchCmd::Invert { patch } => cmd_patch_invert(&patch),
+            PatchCmd::Compose { first, second } => cmd_patch_compose(&first, &second),
+        },
+        Command::GitDiff { args } => cmd_git_diff(&args),
+        Command::GitMerge { base, ours, theirs } => cmd_git_merge(&base, &ours, &theirs),
     };
     if let Err(e) = result {
         eprintln!("etale: {e}");
@@ -48,12 +117,96 @@ fn main() {
     }
 }
 
-// ─── stdin helpers ───────────────────────────────────────────────────────────
+// ─── diff ────────────────────────────────────────────────────────────────────
 
-fn read_stdin_json() -> Result<Value, String> {
+fn cmd_diff(a: &str, b: &str, json: bool) -> Result<(), String> {
+    let fmt = convert::detect(a);
+    match fmt {
+        convert::Format::Text => cmd_text_diff(a, b),
+        _ => {
+            let ta = convert::file_to_tree(a, fmt)?;
+            let tb = convert::file_to_tree(b, fmt)?;
+            let diff = tree::tree_diff(&ta, &tb);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&diff).map_err(|e| e.to_string())?);
+            } else {
+                print_structural_diff(a, b, &diff);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_structural_diff(a: &str, b: &str, diff: &tree::TreeDiff) {
+    println!("diff --etale {} {}", a, b);
+    if diff.changes.is_empty() {
+        println!("(no changes)");
+        return;
+    }
+    for c in &diff.changes {
+        let kind = match c.kind {
+            ChangeKind::Added => "added",
+            ChangeKind::Removed => "removed",
+            ChangeKind::Modified => "modified",
+        };
+        let path = if c.path.is_empty() {
+            c.id.clone()
+        } else {
+            c.path.last().cloned().unwrap_or_default()
+        };
+        match c.kind {
+            ChangeKind::Added | ChangeKind::Removed => {
+                println!("  {kind:10} {path}");
+            }
+            ChangeKind::Modified => {
+                for attr in &c.changed_attrs {
+                    if attr.name == "value" {
+                        println!("  {kind:10} {path:30} {} → {}", attr.old, attr.new);
+                    } else {
+                        println!("  {kind:10} {path}.{}: {} → {}", attr.name, attr.old, attr.new);
+                    }
+                }
+                if let Some((old, new)) = &c.changed_text {
+                    if c.changed_attrs.is_empty() {
+                        println!("  {kind:10} {path:30} {old} → {new}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cmd_text_diff(a: &str, b: &str) -> Result<(), String> {
+    let lines_a = read_lines(a)?;
+    let lines_b = read_lines(b)?;
+    let ops = lines::diff(&lines_a, &lines_b);
+    let paired = inline::pair_replacements(ops, inline::DEFAULT_SIMILARITY);
+    let unified = unified::to_unified(&paired, 3);
+    if unified.is_empty() {
+        println!("diff --etale {} {}", a, b);
+        println!("(no changes)");
+    } else {
+        print!("diff --etale {} {}\n{}", a, b, unified);
+    }
+    Ok(())
+}
+
+fn read_lines(path: &str) -> Result<Vec<String>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let normalized = text.replace("\r\n", "\n");
+    let mut lines: Vec<String> = normalized.split('\n').map(String::from).collect();
+    if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    Ok(lines)
+}
+
+// ─── tree-diff / tree-merge (stdin JSON API) ─────────────────────────────────
+
+fn read_stdin_json() -> Result<serde_json::Value, String> {
     let mut input = String::new();
-    io::stdin()
-        .read_to_string(&mut input)
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
         .map_err(|e| format!("read stdin: {e}"))?;
     if input.is_empty() {
         return Err("no input on stdin".into());
@@ -61,129 +214,151 @@ fn read_stdin_json() -> Result<Value, String> {
     serde_json::from_str(&input).map_err(|e| format!("parse JSON: {e}"))
 }
 
-fn json_to_grid(v: &Value) -> Vec<Vec<String>> {
-    v.as_array()
-        .map(|rows| {
-            rows.iter()
-                .map(|row| {
-                    row.as_array()
-                        .map(|cells| {
-                            cells
-                                .iter()
-                                .map(|c| match c {
-                                    Value::String(s) => s.clone(),
-                                    _ => c.to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+fn get_field<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a serde_json::Value, String> {
+    input.get(key).ok_or_else(|| format!("missing '{key}' in input JSON"))
 }
 
-fn get_field<'a>(input: &'a Value, key: &str) -> Result<&'a Value, String> {
-    input
-        .get(key)
-        .ok_or_else(|| format!("missing '{key}' in input JSON"))
+fn value_to_tree(v: &serde_json::Value) -> Result<TreeNode, String> {
+    let s = serde_json::to_string(v).map_err(|e| format!("serialize: {e}"))?;
+    convert::str_to_tree(&s, convert::Format::Json)
 }
-
-fn json_to_pretty<T: serde::Serialize>(val: &T) -> Result<String, String> {
-    serde_json::to_string_pretty(val).map_err(|e| format!("serialize: {e}"))
-}
-
-// ─── diff ────────────────────────────────────────────────────────────────────
-
-fn cmd_diff(a: &str, b: &str, json: bool) -> Result<(), String> {
-    let result = mumford::dispatch(a, b)?;
-    if json {
-        println!("{}", json_to_pretty(&result)?);
-    } else {
-        print_diff_human(&result);
-    }
-    Ok(())
-}
-
-fn print_diff_human(result: &mumford::DiffResult) {
-    if !result.error.is_empty() {
-        eprintln!("{}", result.error);
-        return;
-    }
-
-    println!("diff --etale {} {}", result.path_a, result.path_b);
-
-    if let Some(text) = &result.text {
-        println!("format: text");
-        let unified = mumford::unified::to_unified(&text.ops, 3);
-        if unified.is_empty() {
-            println!("(no changes)");
-        } else {
-            print!("{unified}");
-        }
-    } else if let Some(excel) = &result.excel {
-        println!("format: excel");
-        for sheet in &excel.sheets {
-            let g = &sheet.grid;
-            if sheet.status == "equal" {
-                println!("  sheet \"{}\": equal", sheet.name);
-            } else {
-                println!(
-                    "  sheet \"{}\": {} (+{} −{} ~{} rows)",
-                    sheet.name, sheet.status, g.added_rows, g.removed_rows, g.modified_rows
-                );
-            }
-        }
-    } else if let Some(docx) = &result.docx {
-        println!("format: docx");
-        println!(
-            "  {} added, {} modified, {} deleted paragraphs",
-            docx.added_p.len(),
-            docx.modified_p.len(),
-            docx.deleted_p.len()
-        );
-    } else if let Some(_) = &result.pptx {
-        println!("format: pptx");
-        println!("  (use --json for details)");
-    }
-}
-
-// ─── grid diff / merge ───────────────────────────────────────────────────────
-
-fn cmd_grid_diff() -> Result<(), String> {
-    let input = read_stdin_json()?;
-    let base = json_to_grid(get_field(&input, "base")?);
-    let other = json_to_grid(get_field(&input, "other")?);
-    let diff = mumford::grid::grid_diff(&base, &other, &mumford::grid::GridOptions::default());
-    println!("{}", json_to_pretty(&diff)?);
-    Ok(())
-}
-
-// ─── tree diff / merge ───────────────────────────────────────────────────────
 
 fn cmd_tree_diff() -> Result<(), String> {
     let input = read_stdin_json()?;
-    let base = serde_json::to_string(get_field(&input, "base")?)
-        .map_err(|e| format!("serialize base: {e}"))?;
-    let other = serde_json::to_string(get_field(&input, "other")?)
-        .map_err(|e| format!("serialize other: {e}"))?;
-    let diff = mumford::json::json_diff(&base, &other)?;
-    println!("{}", json_to_pretty(&diff)?);
+    let base = value_to_tree(get_field(&input, "base")?)?;
+    let other = value_to_tree(get_field(&input, "other")?)?;
+    let diff = tree::tree_diff(&base, &other);
+    println!("{}", serde_json::to_string_pretty(&diff).map_err(|e| e.to_string())?);
     Ok(())
 }
 
 fn cmd_tree_merge() -> Result<(), String> {
     let input = read_stdin_json()?;
-    let base_str = serde_json::to_string(get_field(&input, "base")?)
-        .map_err(|e| format!("serialize base: {e}"))?;
-    let ours_str = serde_json::to_string(get_field(&input, "ours")?)
-        .map_err(|e| format!("serialize ours: {e}"))?;
-    let theirs_str = serde_json::to_string(get_field(&input, "theirs")?)
-        .map_err(|e| format!("serialize theirs: {e}"))?;
-    let base = mumford::json::json_to_tree(&base_str)?;
-    let ours = mumford::json::json_to_tree(&ours_str)?;
-    let theirs = mumford::json::json_to_tree(&theirs_str)?;
-    let result = tate::tree::tree_merge(&base, &ours, &theirs);
-    println!("{}", json_to_pretty(&result)?);
+    let base = value_to_tree(get_field(&input, "base")?)?;
+    let ours = value_to_tree(get_field(&input, "ours")?)?;
+    let theirs = value_to_tree(get_field(&input, "theirs")?)?;
+    let result = tree::tree_merge(&base, &ours, &theirs);
+    println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
     Ok(())
+}
+
+// ─── patch algebra ───────────────────────────────────────────────────────────
+
+fn read_patch(path: &str) -> Result<patch::Patch, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let jp: JsonPatch = serde_json::from_str(&s).map_err(|e| format!("parse patch: {e}"))?;
+    Ok(patch_from_json(jp))
+}
+
+fn write_patch(p: &patch::Patch) -> Result<String, String> {
+    let jp = patch_to_json(p);
+    serde_json::to_string_pretty(&jp).map_err(|e| format!("serialize patch: {e}"))
+}
+
+fn cmd_patch_diff(a: &str, b: &str) -> Result<(), String> {
+    let fmt = convert::detect(a);
+    let ta = convert::file_to_tree(a, fmt)?;
+    let tb = convert::file_to_tree(b, fmt)?;
+    let p = patch::diff(&ta, &tb);
+    println!("{}", write_patch(&p)?);
+    Ok(())
+}
+
+fn cmd_patch_apply(patch_path: &str, input_path: &str) -> Result<(), String> {
+    let p = read_patch(patch_path)?;
+    let fmt = convert::detect(input_path);
+    let tree = convert::file_to_tree(input_path, fmt)?;
+    let result = patch::apply(&p, &tree).map_err(|e| format!("apply failed: {e}"))?;
+    println!("{}", convert::tree_to_json_pretty(&result));
+    Ok(())
+}
+
+fn cmd_patch_invert(patch_path: &str) -> Result<(), String> {
+    let p = read_patch(patch_path)?;
+    let inv = patch::invert(&p);
+    println!("{}", write_patch(&inv)?);
+    Ok(())
+}
+
+fn cmd_patch_compose(first: &str, second: &str) -> Result<(), String> {
+    let p1 = read_patch(first)?;
+    let p2 = read_patch(second)?;
+    let composed = patch::compose(&p1, &p2);
+    println!("{}", write_patch(&composed)?);
+    Ok(())
+}
+
+// ─── git integration ─────────────────────────────────────────────────────────
+
+fn cmd_git_diff(args: &[String]) -> Result<(), String> {
+    if args.len() < 7 {
+        return Err("git-diff needs 7 arguments (path old-file old-hex old-mode new-file new-hex new-mode)".into());
+    }
+    let path = &args[0];
+    let old_file = &args[1];
+    let new_file = &args[4];
+    let fmt = convert::detect(path);
+
+    match fmt {
+        convert::Format::Text => {
+            let lines_a = read_lines(old_file)?;
+            let lines_b = read_lines(new_file)?;
+            let ops = lines::diff(&lines_a, &lines_b);
+            let paired = inline::pair_replacements(ops, inline::DEFAULT_SIMILARITY);
+            let unified = unified::to_unified(&paired, 3);
+            print!("diff --etale a/{path} b/{path}\n{unified}");
+        }
+        _ => {
+            let ta = convert::file_to_tree(old_file, fmt)?;
+            let tb = convert::file_to_tree(new_file, fmt)?;
+            let diff = tree::tree_diff(&ta, &tb);
+            print!("diff --etale a/{path} b/{path}\n");
+            if diff.changes.is_empty() {
+                println!("(no changes)");
+            } else {
+                for c in &diff.changes {
+                    let kind = match c.kind {
+                        ChangeKind::Added => "+",
+                        ChangeKind::Removed => "-",
+                        ChangeKind::Modified => "~",
+                    };
+                    let loc = c.path.last().cloned().unwrap_or_else(|| c.id.clone());
+                    println!("  {kind} {loc}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_git_merge(base: &str, ours: &str, theirs: &str) -> Result<(), String> {
+    let fmt = convert::detect(ours);
+    let tb = convert::file_to_tree(base, fmt)?;
+    let to = convert::file_to_tree(ours, fmt)?;
+    let tt = convert::file_to_tree(theirs, fmt)?;
+    let result = tree::tree_merge(&tb, &to, &tt);
+
+    let output = match fmt {
+        convert::Format::Json => convert::tree_to_json_pretty(&result.tree),
+        convert::Format::Yaml => {
+            let jv = convert::tree_to_json_value(&result.tree);
+            serde_yaml::to_string(&jv).map_err(|e| format!("serialize YAML: {e}"))?
+        }
+        convert::Format::Toml => convert::tree_to_json_pretty(&result.tree),
+        convert::Format::Text => {
+            return Err("etale git-merge does not support text format — use git's built-in merge".into());
+        }
+    };
+
+    std::fs::write(ours, &output).map_err(|e| format!("write {ours}: {e}"))?;
+
+    if result.conflicts.is_empty() {
+        Ok(())
+    } else {
+        for c in &result.conflicts {
+            let loc = c.path.last().cloned().unwrap_or_default();
+            eprintln!("CONFLICT ({:?}): {} {}", c.kind, loc, c.attr);
+        }
+        std::process::exit(1);
+    }
 }
