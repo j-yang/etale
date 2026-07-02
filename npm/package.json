@@ -1,7 +1,7 @@
 {
   "name": "@j-yang/etale",
-  "version": "0.1.0",
-  "description": "Structured diff and merge CLI — powered by tate and mumford",
+  "version": "0.2.0",
+  "description": "Structural diff and merge for JSON/YAML/TOML — identity-based merge, lossless patch algebra, git merge driver",
   "license": "MIT",
   "repository": {
     "type": "git",
