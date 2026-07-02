@@ -1,5 +1,5 @@
 {
-  "name": "etale",
+  "name": "@j-yang/etale",
   "version": "0.1.0",
   "description": "Structured diff and merge CLI — powered by tate and mumford",
   "license": "MIT",
@@ -27,5 +27,8 @@
   "files": [
     "install.js",
     "bin/etale.js"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
