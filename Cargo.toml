@@ -9,7 +9,7 @@ keywords = ["diff", "merge", "git", "structured-data", "cli"]
 categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
-tate = "0.5"
+tate = "0.6"
 mumford = "0.5"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
