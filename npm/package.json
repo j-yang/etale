@@ -1,6 +1,6 @@
 {
   "name": "@j-yang/etale",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Structural diff and merge for JSON/YAML/TOML — identity-based merge, lossless patch algebra, git merge driver",
   "license": "MIT",
   "repository": {

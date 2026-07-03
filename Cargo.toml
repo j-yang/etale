@@ -1,6 +1,6 @@
 [package]
 name = "etale"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 description = "Structural diff and merge CLI for JSON, YAML, TOML, and text — powered by tate's patch algebra"
