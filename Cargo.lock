@@ -270,9 +270,9 @@ dependencies = [
 
 [[package]]
 name = "tate"
-version = "0.7.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cba2807801eefb61778cf332599485b3cb48092f3038a4f7478224ff6ec347d"
+checksum = "fa8146c79fb635dc3e1ed5a049885c8705a0aea2db3a6a0f9e635bc4fc5a67ba"
 dependencies = [
  "serde",
 ]

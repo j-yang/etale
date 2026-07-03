@@ -218,15 +218,14 @@ fn get_field<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a serde_js
     input.get(key).ok_or_else(|| format!("missing '{key}' in input JSON"))
 }
 
-fn value_to_tree(v: &serde_json::Value) -> Result<TreeNode, String> {
-    let s = serde_json::to_string(v).map_err(|e| format!("serialize: {e}"))?;
-    convert::str_to_tree(&s, convert::Format::Json)
+fn value_to_tree(v: &serde_json::Value) -> TreeNode {
+    convert::from_json_value("root", v)
 }
 
 fn cmd_tree_diff() -> Result<(), String> {
     let input = read_stdin_json()?;
-    let base = value_to_tree(get_field(&input, "base")?)?;
-    let other = value_to_tree(get_field(&input, "other")?)?;
+    let base = value_to_tree(get_field(&input, "base")?);
+    let other = value_to_tree(get_field(&input, "other")?);
     let diff = tree::tree_diff(&base, &other);
     println!("{}", serde_json::to_string_pretty(&diff).map_err(|e| e.to_string())?);
     Ok(())
@@ -234,9 +233,9 @@ fn cmd_tree_diff() -> Result<(), String> {
 
 fn cmd_tree_merge() -> Result<(), String> {
     let input = read_stdin_json()?;
-    let base = value_to_tree(get_field(&input, "base")?)?;
-    let ours = value_to_tree(get_field(&input, "ours")?)?;
-    let theirs = value_to_tree(get_field(&input, "theirs")?)?;
+    let base = value_to_tree(get_field(&input, "base")?);
+    let ours = value_to_tree(get_field(&input, "ours")?);
+    let theirs = value_to_tree(get_field(&input, "theirs")?);
     let result = tree::tree_merge(&base, &ours, &theirs);
     println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
     Ok(())
@@ -255,6 +254,21 @@ fn write_patch(p: &patch::Patch) -> Result<String, String> {
     serde_json::to_string_pretty(&jp).map_err(|e| format!("serialize patch: {e}"))
 }
 
+fn tree_to_string(tree: &TreeNode, fmt: convert::Format) -> Result<String, String> {
+    match fmt {
+        convert::Format::Json => Ok(convert::tree_to_json_pretty(tree)),
+        convert::Format::Yaml => {
+            let jv = convert::tree_to_json_value(tree);
+            serde_yaml::to_string(&jv).map_err(|e| format!("serialize YAML: {e}"))
+        }
+        convert::Format::Toml => {
+            let jv = convert::tree_to_json_value(tree);
+            toml::to_string(&jv).map_err(|e| format!("serialize TOML: {e}"))
+        }
+        convert::Format::Text => Err("text format has no tree serialization".into()),
+    }
+}
+
 fn cmd_patch_diff(a: &str, b: &str) -> Result<(), String> {
     let fmt = convert::detect(a);
     let ta = convert::file_to_tree(a, fmt)?;
@@ -269,7 +283,7 @@ fn cmd_patch_apply(patch_path: &str, input_path: &str) -> Result<(), String> {
     let fmt = convert::detect(input_path);
     let tree = convert::file_to_tree(input_path, fmt)?;
     let result = patch::apply(&p, &tree).map_err(|e| format!("apply failed: {e}"))?;
-    println!("{}", convert::tree_to_json_pretty(&result));
+    println!("{}", tree_to_string(&result, fmt)?);
     Ok(())
 }
 
@@ -339,15 +353,10 @@ fn cmd_git_merge(base: &str, ours: &str, theirs: &str) -> Result<(), String> {
     let result = tree::tree_merge(&tb, &to, &tt);
 
     let output = match fmt {
-        convert::Format::Json => convert::tree_to_json_pretty(&result.tree),
-        convert::Format::Yaml => {
-            let jv = convert::tree_to_json_value(&result.tree);
-            serde_yaml::to_string(&jv).map_err(|e| format!("serialize YAML: {e}"))?
-        }
-        convert::Format::Toml => convert::tree_to_json_pretty(&result.tree),
         convert::Format::Text => {
             return Err("etale git-merge does not support text format — use git's built-in merge".into());
         }
+        _ => tree_to_string(&result.tree, fmt)?,
     };
 
     std::fs::write(ours, &output).map_err(|e| format!("write {ours}: {e}"))?;
